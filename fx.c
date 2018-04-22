@@ -3,7 +3,6 @@
 #include <avr/interrupt.h>
 
 #include "fx.h"
-#include "samples.h"
 #include "ym2149.h"
 
 //Timer

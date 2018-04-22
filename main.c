@@ -20,7 +20,7 @@ int main()
   unsigned char cmd;
   unsigned int mask;
   unsigned char r[16];
-  unsigned char dd_cmd;
+ // unsigned char dd_cmd;
 
   set_bus_ctl();
   initUART();
@@ -44,7 +44,7 @@ int main()
         fx_loadDigidrum();
         break;  
     }
-
+/*
     // r3 free bits are used to code a DD start.
     // r3 b5-b4 is a 2bits code wich means:
     dd_cmd = (r[3] & 0x30) >> 4;
@@ -70,7 +70,7 @@ int main()
 
       fx_playDigidrum(dd_sample, dd_voice, dd_div);
     }
-
+*/
     // YM Nano hardware I/O on port A and B of the  PSG
     r[7] |= 0x40; // Setup IOA as output
     r[7] &= 0x7F; // Setup IOB as input
