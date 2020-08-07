@@ -1,47 +1,78 @@
 #include <string.h>
+
+#include "fx.h"
 #include "uart.h"
 #include "ym2149.h"
-#include "fx.h"
+
+#define FRAME_BUFFER_SIZE 10
 
 typedef struct _s_frame {
-  uint16_t mask;
-  uint8_t regs[16];
+    uint16_t mask;
+    uint8_t regs[16];
 } FRAME;
 
 // These are shared between the interrupt vector and the main loop,
 // so we mark them volatile.
-FRAME frame;  // well, expect for this one as it is "read-only"
-uint8_t swTCNT0Max = 0;
+FRAME frames[FRAME_BUFFER_SIZE];  // well, expect for this one as it is never written in the ISR
 volatile uint8_t nbFrames = 0;
+volatile uint8_t readIndex = 0;
+uint8_t swTCNT0Max = 0;
 volatile uint8_t syncFlag = 0;
 volatile uint8_t swTCNT0 = 0;
 
+FRAME *pop_frame() {
+    if (nbFrames) {
+        FRAME *frame = frames + readIndex;
+        readIndex = (readIndex + 1) % FRAME_BUFFER_SIZE;
+        nbFrames--; // There can be contention on nbFrames, so update it last
+        return frame;
+    } else {
+        return NULL;
+    }
+}
+
+FRAME *push_frame(FRAME *frame) {
+    if (nbFrames < FRAME_BUFFER_SIZE) {
+        int i = (readIndex + nbFrames) % FRAME_BUFFER_SIZE;
+        frames[i] = *frame;
+        nbFrames++; // There can be contention on nbFrames, so update it last
+        return frames + i;
+    } else {
+        return NULL;
+    }
+}
+
+void clear_frame_buffer() {
+  nbFrames = 0;
+}
+
 // Song vector
 ISR(TIMER0_COMPA_vect) {
+    FRAME *frame;
 
-  if (swTCNT0 ++ == swTCNT0Max) {
-    swTCNT0 = 0;
-///// @16MHz/64/(TCNTC0 + 1)/(swTCNT0Max + 1)
-    if (nbFrames) {
-      set_registers(frame.regs, frame.mask);
-      fx_playYM6((uint8_t *)&(frame.regs));
-      fx_playYM6((uint8_t *)&(frame.regs));
-      nbFrames --;
+    if (swTCNT0++ == swTCNT0Max) {
+        swTCNT0 = 0;
+        ///// @16MHz/64/(TCNTC0 + 1)/(swTCNT0Max + 1)
+        if ((frame = pop_frame())) {
+            set_registers(frame->regs, frame->mask);
+            fx_playYM6((uint8_t *)&(frame->regs));
+            fx_playYM6((uint8_t *)&(frame->regs));
+        }
+
+        syncFlag = 0;
+        //////
     }
-
-    syncFlag = 0;
-//////
-  }
 }
 
 void sync() {
-  syncFlag = 1;
-  while (syncFlag != 0);
+    syncFlag = 1;
+    while (syncFlag != 0)
+        ;
 }
 
 ///// @16MHz/64/(TCNTC0 + 1)/(swTCNT0Max + 1)
 
-// | hwCounter | swCounter |        Freq (Hz) 
+// | hwCounter | swCounter |        Freq (Hz)
 // |           |           | prediv=64   prediv=256
 // |-----------------------------------|------------
 // | 0         | 0         | 250000    | 62500
@@ -59,101 +90,108 @@ void sync() {
 // | 255       | 255       | 3.8...    | ~1
 
 void setupSongTimer(uint16_t freqHz) {
-  uint8_t hwCounter, swCounter;
+    uint8_t hwCounter, swCounter;
 
-  hwCounter = 49;
-  swCounter = (5000 / freqHz) - 1;
+    hwCounter = 49;
+    swCounter = (5000 / freqHz) - 1;
 
-  cli();
+    cli();
 
-  swTCNT0Max = swCounter;
-  //timer0 : song interrupt
-  TCCR0A = 0;              // timer reset
-  TCCR0B = 0;              // timer reset
-  OCR0A = hwCounter;       // counter = ((16Mhz / 64) / freqHz) - 1
-  TCCR0A |= (1 << WGM01);  //CTC mode
-  TCCR0B |= ((1 << CS01) | (1 << CS00));   // timer ticks = clock ticks / 64
-  TIMSK0 |= (1 << OCIE0A); // enable compare
+    swTCNT0Max = swCounter;
+    //timer0 : song interrupt
+    TCCR0A = 0;                             // timer reset
+    TCCR0B = 0;                             // timer reset
+    OCR0A = hwCounter;                      // counter = ((16Mhz / 64) / freqHz) - 1
+    TCCR0A |= (1 << WGM01);                 //CTC mode
+    TCCR0B |= ((1 << CS01) | (1 << CS00));  // timer ticks = clock ticks / 64
+    TIMSK0 |= (1 << OCIE0A);                // enable compare
 
-  sei();
+    sei();
 }
 
-void clear_frame(FRAME *f)
-{
-  uint8_t rclear[] = {0, 0, 0, 0, 0, 0, 0, 0x40,
-                      0, 0, 0, 0, 0, 0, 0, 0};
-  f->mask = 0x7fff;
-  memcpy(f->regs, rclear, 16);
+void clear_frame(FRAME *f) {
+    uint8_t rclear[] = {0, 0, 0, 0, 0, 0, 0, 0x40,
+                        0, 0, 0, 0, 0, 0, 0, 0};
+    f->mask = 0x7fff;
+    memcpy(f->regs, rclear, 16);
 }
 
 void set_leds(uint8_t value, FRAME *f) {
-  f->regs[7] |= 0x40; // Setup IOA as output
-  f->regs[7] &= 0x7F; // Setup IOB as input
+    f->regs[7] |= 0x40;  // Setup IOA as output
+    f->regs[7] &= 0x7F;  // Setup IOB as input
 
-  f->regs[14] = value;
-  // Set regs 7 & 14 for writing
-  f->mask |= 0x4080;
+    f->regs[14] = value;
+    // Set regs 7 & 14 for writing
+    f->mask |= 0x4080;
 }
 
 void refresh_leds(FRAME *f) {
-  uint8_t leds;
+    uint8_t leds;
 
-  // Have LED blink with noise (drums)
-  leds = (~f->regs[7] & 0x38) ? 0x01 : 0x00;
-  // Add ABC volume LEDs
-  leds |= ((f->regs[8] & 0x08) >> 2) | ((f->regs[9] & 0x08) >> 1) | (f->regs[10] & 0x08);
-  set_leds(leds, f);
+    // Have LED blink with noise (drums)
+    leds = (~f->regs[7] & 0x38) ? 0x01 : 0x00;
+    // Add ABC volume LEDs
+    leds |= ((f->regs[8] & 0x08) >> 2) | ((f->regs[9] & 0x08) >> 1) | (f->regs[10] & 0x08);
+    set_leds(leds, f);
 }
 
-int main()
-{
-  uint16_t i;
-  uint8_t cmd;
+int main() {
+    FRAME f;
+    uint16_t i;
+    uint8_t cmd;
+    uint8_t blink = 0;
 
-  set_bus_ctl();
-  initUART();
-  setupSongTimer(10); // Start timer @10Hz by default (idle)
-  // Mute and turn off leds
-  clear_frame(&frame);  
-  nbFrames = 1;
+    set_bus_ctl();
+    initUART();
+    setupSongTimer(10);  // Start timer @10Hz by default (idle)
+    // Mute and turn off leds
+    clear_frame(&f);
+    push_frame(&f);
 
-main_loop: 
-  // sync to song interrupt
-  sync();
+main_loop:
 
-  putByte(0);       // Tell the arduino we are Ready to RCV
-  cmd = getByte();  // First byte is the CMD
+    if (nbFrames == FRAME_BUFFER_SIZE) {
+      sync();
+      goto main_loop;
+    }
 
-  switch(cmd) {
-    case 0:         // NOP
-      break;
-    case 1:         // recvRateHz
-      setupSongTimer(getUShort());
-      break;
-    case 2:         // recvFrame
-      // if (nbFrames == 1) {
-      //   // TODO: error handling
-      //   // Buffer overflow
-      // }
-      frame.mask = getUShort();
-      for (i = 0; i < 16; i++) {      // Read masked registers, leave others unchanged
-        if (frame.mask & (1 << i))
-          frame.regs[i] = getByte();
-      }
-      refresh_leds(&frame);
-      nbFrames = 1;
-      break;
-    case 3:       // clearFrame
-      clear_frame(&frame);
-      nbFrames = 1;
-      break;
-    default:
-      // TODO: error handling
-      // unknown CMD
-      break;  
-  }
+    putByte(0);       // Tell the host PC we are Ready to RCV
+    cmd = getByte();  // First byte is the CMD
 
-  goto main_loop; // "Don't tell me what I can't do" - John L.
+    switch (cmd) {
+        case 0:  // NOP
+            blink = ~blink;
+            clear_frame(&f);
+            set_leds(blink & 0x1, &f);
+            push_frame(&f);
+            sync();
+            break;
+        case 1:  // recvRateHz
+            setupSongTimer(getUShort());
+            break;
+        case 2:  // recvFrame
+            f.mask = getUShort();
+            for (i = 0; i < 16; i++) {  // Read masked registers, leave others unchanged
+                if (f.mask & (1 << i))
+                    f.regs[i] = getByte();
+            }
+            refresh_leds(&f);
+            push_frame(&f);
+            break;
+        case 3:                  // close song
+            setupSongTimer(10);  // Timer @10Hz by default (idle)
+            clear_frame_buffer();
+            clear_frame(&f);
+            set_registers(f.regs, f.mask); // immediately silence the YM
+            push_frame(&f); // and just in case there's a pending interrupt
+            break;
+        default:
+            // TODO: error handling
+            // unknown CMD
+            break;
+    }
 
-  return 0;
+    goto main_loop;  // "Don't tell me what I can't do" - John L.
+
+    return 0;
 }
